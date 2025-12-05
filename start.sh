@@ -3,19 +3,33 @@ PORT=30000
 WORKDIR=/var/lib/rustdesk
 PUBKEY_FILE="$WORKDIR/id_ed25519.pub"
 
-echo "[RustDesk Docker] 配置 TCP 端口重定向..."
-iptables -t nat -F PREROUTING
+echo "[RustDesk Docker] 配置 TCP 端口转发（使用 socat + SO_REUSEPORT）..."
 
-iptables -t nat -A PREROUTING -p tcp --dport $PORT -j REDIRECT --to-ports 21116
-iptables -t nat -A PREROUTING -p tcp --dport $PORT -j REDIRECT --to-ports 21117
+# 检查 socat 是否支持 reuseport 选项（不同版本可能有差异）
+if socat -h 2>&1 | grep -q "reuseport"; then
+    REUSE_OPT="reuseport"
+else
+    REUSE_OPT="reuseaddr"
+    echo "[警告] socat 版本不支持 reuseport，将使用 reuseaddr（可能存在兼容性问题）"
+fi
 
-echo "[RustDesk Docker] 30000/tcp 已映射至 21116/21117"
+# 使用 socat + SO_REUSEPORT 将 30000 同时转发到 21116（hbbs）和 21117（hbbr）
+# 操作系统会将新连接均衡分配给两个 socat 进程
+socat TCP-LISTEN:$PORT,fork,$REUSE_OPT TCP:127.0.0.1:21116 &
+SOCAT_PID1=$!
+
+socat TCP-LISTEN:$PORT,fork,$REUSE_OPT TCP:127.0.0.1:21117 &
+SOCAT_PID2=$!
+
+echo "[RustDesk Docker] 30000/tcp 已映射至 21116/21117（TCP-only）"
 
 echo "[RustDesk Docker] 启动 hbbs..."
 /opt/rustdesk/hbbs -r 127.0.0.1:21117 --workdir $WORKDIR &
+HBBS_PID=$!
 
 echo "[RustDesk Docker] 启动 hbbr..."
 /opt/rustdesk/hbbr --workdir $WORKDIR &
+HBBR_PID=$!
 
 # ======================================
 # 等待 hbbs/hbbr 生成 SSH 公钥
@@ -33,4 +47,5 @@ cat "$PUBKEY_FILE"
 echo "========================================"
 echo ""
 
-sleep infinity
+# 等待所有后台进程结束，确保容器持续运行
+wait $SOCAT_PID1 $SOCAT_PID2 $HBBS_PID $HBBR_PID
