@@ -21,31 +21,37 @@ fi
 
 # 3. 验证 hbbs/hbbr 可执行性
 echo "[RustDesk Docker] 验证 hbbs/hbbr 可执行性..."
-if [ ! -x "$HBBS_PATH" ]; then
-    echo "[错误] hbbs 不可执行：$HBBS_PATH"
+if [ ! -f "$HBBS_PATH" ]; then
+    echo "[错误] hbbs 文件不存在：$HBBS_PATH"
     ls -la /opt/rustdesk/  # 调试信息：列出目录内容
     exit 1
 fi
 
-if [ ! -x "$HBBR_PATH" ]; then
-    echo "[错误] hbbr 不可执行：$HBBR_PATH"
+if [ ! -f "$HBBR_PATH" ]; then
+    echo "[错误] hbbr 文件不存在：$HBBR_PATH"
     ls -la /opt/rustdesk/  # 调试信息：列出目录内容
     exit 1
 fi
 
-# 4. 配置端口转发（使用 socat + reuseaddr，兼容更多环境）
-echo "[RustDesk Docker] 配置 TCP 端口转发：30000 -> 21116/21117..."
-# 监听 30000 并转发到 hbbs (21116)
-socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:21116 &
-SOCAT_HBBS_PID=$!
+# 检查文件类型，确保是二进制文件
+if ! file "$HBBS_PATH" | grep -q "executable"; then
+    echo "[错误] hbbs 不是可执行文件：$HBBS_PATH"
+    file "$HBBS_PATH"  # 显示文件类型
+    cat "$HBBS_PATH" | head -20  # 显示文件前20行内容
+    exit 1
+fi
 
-# 监听 30000 并转发到 hbbr (21117)
-socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:21117 &
-SOCAT_HBBR_PID=$!
+if ! file "$HBBR_PATH" | grep -q "executable"; then
+    echo "[错误] hbbr 不是可执行文件：$HBBR_PATH"
+    file "$HBBR_PATH"  # 显示文件类型
+    cat "$HBBR_PATH" | head -20  # 显示文件前20行内容
+    exit 1
+fi
 
-echo "[RustDesk Docker] 端口转发已启动，PID: $SOCAT_HBBS_PID (hbbs), $SOCAT_HBBR_PID (hbbr)"
+# 添加执行权限（确保）
+chmod +x "$HBBS_PATH" "$HBBR_PATH"
 
-# 5. 启动 RustDesk 服务（TCP-only 模式）
+# 4. 先启动 RustDesk 服务（TCP-only 模式）
 echo "[RustDesk Docker] 启动 hbbr..."
 $HBBR_PATH --workdir $WORKDIR &
 HBBR_PID=$!
@@ -58,6 +64,21 @@ $HBBS_PATH -r 127.0.0.1:21117 --tcp-port 21116 --udp-port 0 --workdir $WORKDIR &
 HBBS_PID=$!
 
 echo "[RustDesk Docker] 服务已启动，PID: $HBBS_PID (hbbs), $HBBR_PID (hbbr)"
+
+# 等待服务启动
+sleep 2
+
+# 5. 再配置端口转发（避免端口冲突）
+echo "[RustDesk Docker] 配置 TCP 端口转发：30000 -> 21116/21117..."
+# 监听 30000 并转发到 hbbs (21116)
+socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:21116 &
+SOCAT_HBBS_PID=$!
+
+# 监听 30000 并转发到 hbbr (21117)
+socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:21117 &
+SOCAT_HBBR_PID=$!
+
+echo "[RustDesk Docker] 端口转发已启动，PID: $SOCAT_HBBS_PID (hbbs), $SOCAT_HBBR_PID (hbbr)"
 
 # 6. 等待公钥生成
 echo "[RustDesk Docker] 等待公钥生成..."
@@ -83,6 +104,9 @@ else
     cat $WORKDIR/hbbs.log 2>/dev/null || echo "  日志文件不存在"
     echo "[调试] hbbr 日志："
     cat $WORKDIR/hbbr.log 2>/dev/null || echo "  日志文件不存在"
+    # 调试信息：查看进程状态
+    echo "[调试] 进程状态："
+    ps aux
 fi
 
 # 7. 保持容器运行（等待所有后台进程）
